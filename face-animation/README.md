@@ -56,6 +56,17 @@ Use a frontal, neutral, mouth-closed portrait of an AI-generated person or someo
 python3 faceanim/puppet.py portrait.png work/track.npz work/norm.mp4 out/realistic.mp4 --size 1080x1080
 ```
 
+### Your own character from a photo (recommended settings)
+Use a frontal, neutral, mouth-closed portrait. If its "transparent" checkerboard is baked into the pixels, cut it out first:
+```bash
+python3 faceanim/matte_checker.py character.png work/character_rgba.png      # clean cut-out, hair edges included
+python3 faceanim/make_bg.py work/bg.png 1080x1350                            # warm festive bokeh background
+python3 faceanim/puppet.py work/character_rgba.png work/track.npz work/norm.mp4 out/character_10s.mp4 \
+    --size 1080x1350 --bg work/bg.png --expr 1.1 --lips 1.05 --corners 1.25 --start 0 --end 300   # first 10 s at 30 fps
+```
+With a transparent portrait the character animates on its own layer over a fixed background, the head region
+covers all of the hair, blinks slide the real upper lid and lash line down, and blinks are kept symmetric.
+
 ### VTuber avatar
 ```bash
 python3 faceanim/arkit_export.py work/track.npz work/norm.mp4 work/arkit.json   # if not done yet

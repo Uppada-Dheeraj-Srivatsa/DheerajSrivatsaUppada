@@ -83,15 +83,22 @@ def detect(img_bgr, model=fa.DEFAULT_MODEL):
 
 
 # ---------------------------------------------------------------- mesh
-def build_mesh(Ls, W, H):
-    """Control points (source) and triangles. Returns pts, tris_outer, tris_face, ring info."""
+def build_mesh(Ls, W, H, head_box=None):
+    """Control points (source) and triangles. Returns pts, tris_outer, tris_face, ring info.
+    head_box (x0, y0, x1, y1): region that moves rigidly with the head (face + all of the hair)."""
     oval = Ls[FACE_OVAL]
     c = oval.mean(0)
     hw = (oval[:, 0].max() - oval[:, 0].min()) / 2
     hh = (oval[:, 1].max() - oval[:, 1].min()) / 2
-    t = np.linspace(0, 2 * np.pi, 20, endpoint=False)
-    ring1 = np.stack([c[0] + 1.32 * hw * np.cos(t), c[1] - 0.18 * hh + 1.45 * hh * np.sin(t)], 1)
-    ring2 = np.stack([c[0] + 2.3 * hw * np.cos(t), c[1] - 0.1 * hh + 2.2 * hh * np.sin(t)], 1)
+    t = np.linspace(0, 2 * np.pi, 24, endpoint=False)
+    if head_box is not None:
+        x0, y0, x1, y1 = head_box
+        bc = np.array([(x0 + x1) / 2, (y0 + y1) / 2]); ax = (x1 - x0) / 2 * 1.1; ay = (y1 - y0) / 2 * 1.12
+        ring1 = np.stack([bc[0] + ax * np.cos(t), bc[1] + ay * np.sin(t)], 1)
+        ring2 = np.stack([bc[0] + ax * 1.7 * np.cos(t), bc[1] + 0.1 * ay + ay * 1.6 * np.sin(t)], 1)
+    else:
+        ring1 = np.stack([c[0] + 1.32 * hw * np.cos(t), c[1] - 0.18 * hh + 1.45 * hh * np.sin(t)], 1)
+        ring2 = np.stack([c[0] + 2.3 * hw * np.cos(t), c[1] - 0.1 * hh + 2.2 * hh * np.sin(t)], 1)
     bx = np.linspace(0, W - 1, 7); by = np.linspace(0, H - 1, 11)
     border = np.concatenate([np.stack([bx, np.zeros_like(bx)], 1), np.stack([bx, np.full_like(bx, H - 1)], 1),
                              np.stack([np.zeros_like(by[1:-1]), by[1:-1]], 1), np.stack([np.full_like(by[1:-1], W - 1), by[1:-1]], 1)])
@@ -174,31 +181,33 @@ def draw_mouth(img, P, mouth_w):
     edge = np.clip(1 - np.abs(cx - 0.5) * 2, 0, 1) ** 0.6  # darker toward the corners
     # cavity
     col = np.zeros((h, w, 3), np.float32)
-    cav_dark = np.array([22, 16, 34], np.float32); cav_light = np.array([48, 40, 92], np.float32)
+    cav_dark = np.array([12, 9, 20], np.float32); cav_light = np.array([36, 30, 66], np.float32)
     col[:] = cav_dark + (cav_light - cav_dark) * (edge * np.clip(tdepth, 0, 1))[..., None] * 0.8
     # tongue (lower middle)
     tongue = np.clip(1 - (((cx - 0.5) / 0.34) ** 2 + ((tdepth - 1.05) / 0.55) ** 2), 0, 1)
     col = col * (1 - tongue[..., None] * 0.9) + np.array([92, 88, 168], np.float32) * (0.55 + 0.45 * edge)[..., None] * tongue[..., None] * 0.9
     # upper teeth: band under the upper lip, shown once the mouth is open enough
-    opened = np.clip((open_ratio - 0.01) / 0.05, 0, 1)
-    tooth_h = np.minimum(gap * 0.42, mouth_w * ss * 0.11)
+    opened = np.clip((open_ratio - 0.015) / 0.05, 0, 1)
+    tooth_h = np.minimum(gap * 0.33, mouth_w * ss * 0.085)
     teeth = np.clip(1 - (ys - yu[None]) / tooth_h[None], 0, 1)
-    teeth = (teeth > 0.02).astype(np.float32) * np.clip(edge * 1.6, 0, 1) * opened
-    teeth = cv2.GaussianBlur(teeth, (0, 0), ss * 0.6)
-    tcol = np.array([206, 214, 222], np.float32) * (0.72 + 0.28 * edge)[..., None]
-    # subtle tooth separations
-    period = mouth_w * ss * 0.105
+    teeth = (teeth > 0.02).astype(np.float32) * np.clip(edge * 1.5, 0, 1) ** 1.3 * opened
+    teeth = cv2.GaussianBlur(teeth, (0, 0), ss * 0.7)
+    # warm off-white, shadowed under the lip and toward the corners
+    vt = np.clip((ys - yu[None]) / np.maximum(tooth_h[None], 1), 0, 1)
+    tcol = np.array([198, 207, 218], np.float32) * ((0.62 + 0.36 * edge) * (0.78 + 0.22 * np.sin(np.pi * np.clip(vt * 0.9 + 0.1, 0, 1))))[..., None]
+    # individual teeth: darker separations
+    period = mouth_w * ss * 0.11
     sep = 0.5 + 0.5 * np.cos((xs - (pp[:, 0].min() + pp[:, 0].max()) / 2) / period * 2 * np.pi)
-    tcol = tcol * (0.9 + 0.1 * sep[..., None] ** 0.3)
+    tcol = tcol * (0.78 + 0.22 * sep[..., None] ** 0.35)
     col = col * (1 - teeth[..., None]) + tcol * teeth[..., None]
     # lower teeth hint for wide openings
     lower = np.clip(1 - (yl[None] - ys) / (tooth_h[None] * 0.6), 0, 1)
-    lower = (lower > 0.02).astype(np.float32) * edge * np.clip((open_ratio - 0.05) / 0.06, 0, 1) * 0.8
+    lower = (lower > 0.02).astype(np.float32) * edge * np.clip((open_ratio - 0.08) / 0.06, 0, 1) * 0.6
     lower = cv2.GaussianBlur(lower, (0, 0), ss * 0.6)
     col = col * (1 - lower[..., None]) + np.array([190, 198, 206], np.float32) * lower[..., None]
     # lip contact shadow
     near = np.minimum(np.abs(ys - yu[None]), np.abs(yl[None] - ys)) / (mouth_w * ss * 0.05)
-    col *= (0.55 + 0.45 * np.clip(near, 0, 1))[..., None]
+    col *= (0.42 + 0.58 * np.clip(near, 0, 1))[..., None]
     col = cv2.resize(col, (x1 - x0, y1 - y0), interpolation=cv2.INTER_AREA)
     roi = img[y0:y1, x0:x1].astype(np.float32)
     a = mask[..., None]
@@ -266,52 +275,66 @@ def draw_eyelids(img, P, src_open):
 
 
 def build_closed_eyes(src, Ls):
-    """Portrait with both eyes closed: real upper-lid skin slid down over each eye, Poisson-blended."""
+    """Portrait with both eyes closed, made like a real blink: the upper-lid skin and its lash line
+    (taken from just above each eye in the same image) slide down until the lashes meet the lower lid."""
     out = src.copy()
     masks = []
     H, W = src.shape[:2]
     for contour, pairs in ((EYE_R, LID_PAIRS[:7]), (EYE_L, LID_PAIRS[7:])):
-        poly = Ls[contour].astype(np.float32)
-        ew = float(np.linalg.norm(Ls[contour[0]] - Ls[contour[8]]))
-        h = max(np.linalg.norm(Ls[u] - Ls[l]) for u, l in pairs)
-        shift = int(round(h * 1.15)) + 2
-        cy = poly[:, 1].mean()
-        grown = poly.copy()
-        up = poly[:, 1] < cy
-        grown[:, 1] = np.where(up, cy + (poly[:, 1] - cy) * 1.6 - h * 0.12, cy + (poly[:, 1] - cy) * 1.25)
-        m = np.zeros((H, W), np.uint8)
-        cv2.fillPoly(m, [np.round(grown).astype(np.int32)], 255)
-        m = cv2.dilate(m, np.ones((5, 5), np.uint8))
-        # closed lid skin: inpaint the eye from the surrounding lid/cheek skin of the clean photo
-        filled = cv2.inpaint(out, m, max(4, int(ew * 0.18)), cv2.INPAINT_TELEA).astype(np.float32)
-        rng = np.random.default_rng(len(masks))
-        grain = cv2.GaussianBlur(rng.normal(0, 1, (H, W)).astype(np.float32), (0, 0), 0.7) * 3.0
-        filled += grain[..., None]
-        # soft crease shadow near the top of the lid and a slight roundness highlight in the middle
-        dist = cv2.distanceTransform((m > 0).astype(np.uint8), cv2.DIST_L2, 3)
-        yy = np.arange(H, dtype=np.float32)[:, None]
-        top_zone = np.clip(1 - (yy - (poly[:, 1].min() - h * 0.2)) / (h * 0.6), 0, 1)
-        filled *= (1 - 0.10 * top_zone * (m > 0))[..., None]
-        filled += (np.clip(dist / (h * 0.5), 0, 1) * 6)[..., None]
-        mf_soft = cv2.GaussianBlur(m.astype(np.float32) / 255, (0, 0), 1.5)[..., None]
-        out = np.clip(out.astype(np.float32) * (1 - mf_soft) + filled * mf_soft, 0, 255).astype(np.uint8)
-        # lash line where the lids meet
-        lower = np.array([Ls[l] for _, l in pairs], np.float32)
-        upper = np.array([Ls[u] for u, _ in pairs], np.float32)
-        line = 0.15 * upper + 0.85 * lower
-        path = np.concatenate([[Ls[contour[0]]], line, [Ls[contour[8]]]])
-        path = path[np.argsort(path[:, 0])]
-        lm = np.zeros((H, W), np.uint8)
-        cv2.polylines(lm, [np.round(path * 4).astype(np.int32)], False, 255, max(1, int(round(ew * 0.04))), cv2.LINE_AA, 2)
-        lmf = cv2.GaussianBlur(lm.astype(np.float32) / 255, (0, 0), 1.0)
-        xs = np.arange(W, dtype=np.float32)[None, :]
-        xc = (path[0, 0] + path[-1, 0]) / 2; hw_ = max((path[-1, 0] - path[0, 0]) / 2, 1)
-        lmf *= np.clip(1 - np.abs(xs - xc) / hw_, 0, 1) ** 0.4 * 0.7
-        f = out.astype(np.float32)
-        f = f * (1 - lmf[..., None]) + np.array([26, 24, 28], np.float32) * lmf[..., None]
-        out = np.clip(f, 0, 255).astype(np.uint8)
-        fm = cv2.GaussianBlur(cv2.dilate(m, np.ones((7, 7), np.uint8)).astype(np.float32) / 255, (0, 0), 2.0)
-        masks.append(fm)
+        up = np.array([Ls[u] for u, _ in pairs], np.float32)
+        lo = np.array([Ls[l] for _, l in pairs], np.float32)
+        ca, cb = Ls[contour[0]].astype(np.float32), Ls[contour[8]].astype(np.float32)
+        left, right = (ca, cb) if ca[0] < cb[0] else (cb, ca)
+        h = float(max(np.linalg.norm(Ls[u] - Ls[l]) for u, l in pairs))
+        ux = np.concatenate([[left[0]], up[:, 0], [right[0]]]); uy = np.concatenate([[left[1]], up[:, 1], [right[1]]])
+        lx = np.concatenate([[left[0]], lo[:, 0], [right[0]]]); ly = np.concatenate([[left[1]], lo[:, 1], [right[1]]])
+        ou = np.argsort(ux); ol = np.argsort(lx)
+        x0 = int(np.floor(left[0] - 0.15 * h)); x1 = int(np.ceil(right[0] + 0.15 * h))
+        xs = np.arange(max(x0, 0), min(x1, W), dtype=np.float32)
+        y_up = np.interp(xs, ux[ou], uy[ou]) + 0.02 * h          # lid margin (lash roots)
+        y_lo = np.interp(xs, lx[ol], ly[ol]) + 0.12 * h          # a little below the lower lid: no eyeball sliver
+        lt = 0.24 * h                                             # lash strip thickness, moved without stretching
+        y_top = y_up - 0.42 * h                                   # just below the lid crease: the crease stays put
+        # columns fade out beyond the eye corners
+        wcol = np.clip(np.minimum(xs - left[0], right[0] - xs) / (0.35 * h) + 0.25, 0, 1)
+        yt0 = int(max(0, np.floor(y_top.min()) - 2)); yb1 = int(min(H, np.ceil(y_lo.max()) + 3))
+        yy = np.arange(yt0, yb1, dtype=np.float32)[:, None]
+        # target rows [y_top, y_lo] sample source rows [y_top, y_up]: the lid stretches down, lashes land on the lower lid
+        # lid skin [y_top, y_up - lt] stretches over [y_top, y_lo - lt]; lash strip [y_up - lt, y_up] moves down intact
+        skin_end_t = (y_lo - lt)[None]; skin_end_s = (y_up - lt)[None]
+        frac = (yy - y_top[None]) / np.maximum(skin_end_t - y_top[None], 1)
+        sy_skin = y_top[None] + np.clip(frac, 0, 1) * (skin_end_s - y_top[None])
+        sy_lash = yy - (y_lo - y_up)[None]
+        sy = np.where(yy < skin_end_t, sy_skin, np.clip(sy_lash, skin_end_s, (y_up + 0.04 * h)[None]))
+        mx = np.repeat(xs[None], len(yy), 0).astype(np.float32)
+        my = np.where((yy >= y_top[None]) & (yy <= y_lo[None] + 1.5), sy, yy).astype(np.float32)
+        patch = cv2.remap(src, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT).astype(np.float32)
+        # the stretched skin is smoothed sideways (no vertical streaks) and given fine grain back
+        is_skin = ((yy >= y_top[None]) & (yy < skin_end_t)).astype(np.float32)
+        sm = cv2.GaussianBlur(patch, (0, 0), sigmaX=max(1.0, 0.16 * h), sigmaY=0.6)
+        grain = np.random.default_rng(len(masks) + 7).normal(0, 2.2, patch.shape[:2]).astype(np.float32)
+        sm = sm + cv2.GaussianBlur(grain, (0, 0), 0.6)[..., None]
+        # lid tone: pull toward the skin above the crease, plus a soft highlight where the eyeball rounds the lid
+        ref_rows = (int(max(0, np.median(y_up) - 1.0 * h)), int(max(1, np.median(y_up) - 0.7 * h)))
+        xa_ = int(xs[0]); xb_ = xa_ + len(xs)
+        skin_ref = np.median(src[ref_rows[0]:ref_rows[1], xa_:xb_].reshape(-1, 3), axis=0).astype(np.float32)
+        sm = sm * 0.72 + skin_ref[None, None, :] * 0.28
+        cxe = 0.5 * (left[0] + right[0]); hw_e = 0.5 * (right[0] - left[0])
+        ycen = 0.5 * (y_top + skin_end_t[0])
+        hl = np.exp(-(((xs[None] - cxe) / (0.65 * hw_e)) ** 2) - (((yy - ycen[None]) / (0.45 * h)) ** 2))
+        sm = sm * (1 + 0.07 * hl[..., None])
+        ks = cv2.GaussianBlur(is_skin, (0, 0), 1.2)[..., None]
+        patch = patch * (1 - ks) + sm * ks
+        inside = ((yy >= y_top[None]) & (yy <= y_lo[None] + 1.5)).astype(np.float32)
+        wm = inside * wcol[None]
+        # soft top edge (the lid crease stays put) and soft bottom edge
+        topfade = np.clip((yy - y_top[None]) / (0.12 * h), 0, 1)
+        wm = cv2.GaussianBlur(wm * topfade, (0, 0), max(1.0, 0.06 * h))
+        xa = int(xs[0]); xb = xa + len(xs)
+        roi = out[yt0:yb1, xa:xb].astype(np.float32)
+        out[yt0:yb1, xa:xb] = np.clip(roi * (1 - wm[..., None]) + patch * wm[..., None], 0, 255).astype(np.uint8)
+        m = np.zeros((H, W), np.float32); m[yt0:yb1, xa:xb] = wm
+        masks.append(m)
     return out, masks
 
 
@@ -385,19 +408,44 @@ def main():
     ap.add_argument("--frames", default=None)
     ap.add_argument("--size", default="720x1280")
     ap.add_argument("--expr", type=float, default=1.25, help="expression strength")
+    ap.add_argument("--lips", type=float, default=1.25, help="extra gain on lip motion")
+    ap.add_argument("--corners", type=float, default=1.45, help="extra gain on mouth corners (smile)")
     ap.add_argument("--move", type=float, default=0.8, help="head translation strength")
+    ap.add_argument("--bg", default=None, help="background image (used when the portrait has transparency)")
+    ap.add_argument("--start", type=int, default=0); ap.add_argument("--end", type=int, default=None)
     args = ap.parse_args()
     OW, OH = map(int, args.size.split("x"))
 
-    src = cv2.imread(args.portrait)
-    # fit portrait to the output frame (cover)
-    s = max(OW / src.shape[1], OH / src.shape[0])
-    src = cv2.resize(src, (int(round(src.shape[1] * s)), int(round(src.shape[0] * s))), interpolation=cv2.INTER_AREA)
-    ox, oy = (src.shape[1] - OW) // 2, (src.shape[0] - OH) // 2
-    src = src[oy:oy + OH, ox:ox + OW].copy()
-    Ls3 = detect(src)
+    raw = cv2.imread(args.portrait, cv2.IMREAD_UNCHANGED)
+    has_alpha = raw.ndim == 3 and raw.shape[2] == 4
+    if has_alpha and raw.shape[1] == OW and raw.shape[0] == OH:
+        fitted = raw
+    else:
+        # fit portrait to the output frame (cover)
+        s = max(OW / raw.shape[1], OH / raw.shape[0])
+        fitted = cv2.resize(raw, (int(round(raw.shape[1] * s)), int(round(raw.shape[0] * s))), interpolation=cv2.INTER_AREA)
+        ox, oy = (fitted.shape[1] - OW) // 2, (fitted.shape[0] - OH) // 2
+        fitted = fitted[oy:oy + OH, ox:ox + OW].copy()
+    src = fitted[..., :3].copy()
+    src_a = fitted[..., 3].astype(np.float32) / 255.0 if has_alpha else None
+    bg = None
+    if src_a is not None:
+        bg = cv2.resize(cv2.imread(args.bg), (OW, OH)) if args.bg else np.full((OH, OW, 3), 40, np.uint8)
+        det_img = np.clip(src * src_a[..., None] + bg * (1 - src_a[..., None]), 0, 255).astype(np.uint8)
+    else:
+        det_img = src
+    Ls3 = detect(det_img)
     Ls = Ls3[:, :2].copy()
-    pts, tris_outer, tris_face, (i_r1, i_r2, i_b) = build_mesh(Ls, OW, OH)
+    head_box = None
+    if src_a is not None:
+        chin_y = Ls[152, 1]
+        rows = np.where((src_a > 0.5).any(1))[0]
+        ys = np.arange(OH)
+        mask_head = (src_a > 0.5) & (ys[:, None] < chin_y)
+        cols = np.where(mask_head.any(0))[0]
+        head_box = (float(cols.min()), float(rows.min()), float(cols.max()), float(chin_y))
+        print("head box (face + hair):", [round(v) for v in head_box])
+    pts, tris_outer, tris_face, (i_r1, i_r2, i_b) = build_mesh(Ls, OW, OH, head_box)
 
     Ld, ref, shut, fps, gapw = driver_landmarks(args.npz, args.video)
     print("neutral reference frame:", ref)
@@ -408,9 +456,9 @@ def main():
     mouth_w_src = np.linalg.norm(Ls[61] - Ls[291])
     src_open = (lid_open(Ls, LID_PAIRS[:7]), lid_open(Ls, LID_PAIRS[7:]))
     gains = np.full(len(Ls), args.expr, np.float32)
-    gains[LIPS] = args.expr * 1.25
-    gains[BROWS] = args.expr * 1.2
-    gains[[61, 291, 146, 91, 185, 40, 375, 321, 409, 270, 76, 306, 62, 292]] = args.expr * 1.45
+    gains[LIPS] = args.expr * args.lips
+    gains[BROWS] = args.expr * 1.15
+    gains[[61, 291, 146, 91, 185, 40, 375, 321, 409, 270, 76, 306, 62, 292]] = args.expr * args.corners
     gains[FACE_OVAL] = 0.5
 
     c3s = Ls3[STABLE].mean(0)
@@ -441,10 +489,14 @@ def main():
         Lexp = Ls + delta @ S0[:2, :2].T           # expression deltas mapped onto the portrait
         # eyelids: transfer openness as a ratio, so a closed driver eye fully closes the portrait's eye
         closes = []
-        for pairs, contour, iris in ((LID_PAIRS[:7], EYE_R, IRIS_R), (LID_PAIRS[7:], EYE_L, IRIS_L)):
-            r = lid_open(Pn, pairs) / max(lid_open(R, pairs), 1e-3)
-            r = float(np.clip(r, 0, 1.5)) * (1 - shut[t])
-            closes.append(float(np.clip((0.34 - r) / 0.12, 0, 1)))
+        rs = [float(np.clip(lid_open(Pn, pr) / max(lid_open(R, pr), 1e-3), 0, 1.5)) for pr in (LID_PAIRS[:7], LID_PAIRS[7:])]
+        rm = 0.5 * (rs[0] + rs[1])
+        if min(rs) < 0.7 and abs(rs[0] - rs[1]) < 0.45:   # a blink, not a wink: close both eyes together
+            k = 0.25
+            rs = [rm + k * (rs[0] - rm), rm + k * (rs[1] - rm)]
+        for (pairs, contour, iris), r in zip(((LID_PAIRS[:7], EYE_R, IRIS_R), (LID_PAIRS[7:], EYE_L, IRIS_L)), rs):
+            r = r * (1 - shut[t])
+            closes.append(float(np.clip((0.33 - r) / 0.09, 0, 1)))
             r = max(r, 0.28)
             for u, l in pairs:
                 Lexp[u] = Lexp[l] + (Ls[u] - Ls[l]) * r
@@ -484,10 +536,23 @@ def main():
         if os.environ.get("PUPPET_DEBUG"):
             cv2.imwrite(f"{args.out}_dbgsrc_{t:05d}.png", frame_src)
             print("debug closes", t, closes)
-        out = warp(frame_src, pts, tgt, tris_outer, tris_face)
         mw = np.linalg.norm(tgt[61] - tgt[291])
-        draw_mouth(out, tgt, mw)
-        return out
+        if src_a is None:
+            out = warp(frame_src, pts, tgt, tris_outer, tris_face)
+            draw_mouth(out, tgt, mw)
+            return out
+        prem = np.dstack([frame_src.astype(np.float32) * src_a[..., None], src_a * 255.0])
+        w4 = warp(prem, pts, tgt, tris_outer, tris_face)
+        a = np.clip(w4[..., 3] / 255.0, 0, 1)
+        rgb = np.clip(w4[..., :3], 0, 255).astype(np.uint8)
+        draw_mouth(rgb, tgt, mw)
+        f = rgb.astype(np.float32) * np.array([0.97, 1.0, 1.03], np.float32)   # slight warm grade to sit in the scene
+        # light wrap: background light spills softly onto the subject's edges
+        edge = np.clip(a - cv2.erode(a, np.ones((9, 9), np.uint8)), 0, 1)
+        edge = cv2.GaussianBlur(edge, (0, 0), 3.0) * a
+        out = bg.astype(np.float32) * (1 - a[..., None]) + f
+        out = out + edge[..., None] * cv2.GaussianBlur(bg.astype(np.float32), (0, 0), 12) * 0.22
+        return np.clip(out + 0.5, 0, 255).astype(np.uint8)
 
     n = len(Ld)
     if args.frames:
@@ -495,11 +560,13 @@ def main():
             cv2.imwrite(f"{args.out}_{t:05d}.png", render(t))
             print("wrote", f"{args.out}_{t:05d}.png")
         return
+    t0, t1 = args.start, min(n, args.end if args.end is not None else n)
     cmd = ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{OW}x{OH}", "-r", f"{fps}",
-           "-i", "-", "-i", args.video, "-map", "0:v", "-map", "1:a?", "-c:v", "libx264", "-crf", "16", "-preset", "medium",
+           "-i", "-", "-ss", f"{t0 / fps:.4f}", "-t", f"{(t1 - t0) / fps:.4f}", "-i", args.video, "-map", "0:v", "-map", "1:a?",
+           "-c:v", "libx264", "-crf", "16", "-preset", "medium",
            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", args.out]
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-    for t in range(n):
+    for t in range(t0, t1):
         p.stdin.write(render(t).tobytes())
         if t % 100 == 0:
             print(f"  frame {t}/{n}", flush=True)
