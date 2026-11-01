@@ -54,6 +54,7 @@ def main():
     ap.add_argument("npz"); ap.add_argument("voice"); ap.add_argument("out")
     ap.add_argument("--seed", type=int, default=3)
     ap.add_argument("--open", type=float, default=0.75, help="mouth opening at full voice, relative to the widest tracked")
+    ap.add_argument("--lively", type=float, default=1.0, help="head motion: 1 = calm, 2 = lively presenter")
     args = ap.parse_args()
     rng = np.random.default_rng(args.seed)
 
@@ -145,10 +146,20 @@ def main():
         z = fa.gsmooth(rng.normal(0, 1, n).astype(np.float32), sig_s * fps)
         return z / (z.std() + 1e-6) * amp
     stress = np.clip(env - fa.gsmooth(env, 8.0), 0, None)
-    pitch = drift(1.2, 0.022) + 0.09 * fa.gsmooth(stress, 2.0)
-    yaw = drift(1.8, 0.03)
-    roll = drift(2.2, 0.014)
-    tx = drift(2.0, 0.012 * mw * 3); ty = drift(2.0, 0.008 * mw * 3)
+    # phrase gestures: at each phrase start the head settles into a new attitude (a turn, a tilt, chin up or down),
+    # eased in over ~0.3 s and held while the phrase lasts, the way people shift posture as they make a point
+    lv = args.lively
+    pose_t = np.zeros((n, 3))
+    cur = np.zeros(3)
+    marks = [0] + [i for i in range(1, n) if speaking[i] and not speaking[i - 1]] + [n]
+    for a0, a1 in zip(marks[:-1], marks[1:]):
+        cur = 0.35 * cur + np.array([rng.normal(0, 0.030), rng.normal(0, 0.045), rng.normal(0, 0.032)]) * lv
+        pose_t[a0:a1] = cur
+    pose_t = np.stack([fa.gsmooth(pose_t[:, k].astype(np.float32), 0.3 * fps) for k in range(3)], 1)
+    pitch = pose_t[:, 0] + drift(1.2, 0.022 * lv) + 0.09 * (1 + lv) / 2 * fa.gsmooth(stress, 2.0)
+    yaw = pose_t[:, 1] + drift(1.8, 0.03 * lv)
+    roll = pose_t[:, 2] + drift(2.2, 0.014 * lv)
+    tx = drift(2.0, 0.012 * mw * 3 * lv); ty = drift(2.0, 0.008 * mw * 3 * lv)
 
     c = R3[STABLE].mean(0)
     lms = np.zeros((n, 478, 3), np.float32)

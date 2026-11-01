@@ -102,7 +102,14 @@ python3 faceanim/reel_layout.py card.png work/character_rgba.png work/reel     #
 python3 faceanim/puppet.py work/reel/char_canvas.png work/voice_driver.npz voice.m4a out/reel.mp4 \
     --size 1080x1920 --bg work/reel/layout_bg.png --expr 1.1 --lips 1.05 --corners 1.25 --mouth mesh --no-teeth
 ```
-For long recordings, render in parallel with `--start/--end` chunks and join them with ffmpeg's concat demuxer.
+For long recordings, render in parallel with `--start/--end` chunks and join them frame-exactly with ffmpeg's
+concat filter (`-filter_complex concat=n=4:v=1:a=0`); the concat demuxer can drop frames at the joins.
+
+Livelier head movement: `audio_driver.py --lively 2` adds a new head attitude (turn, tilt, chin up or down) at each
+phrase, and `puppet.py --turn 1.6 --move 1.0` lets more of the head motion through (also for video-driven renders).
+Turns are soft-limited to about 5 degrees, because a single front photo starts to fold at the cheek beyond that;
+tilts and nods can go further. Without a card, put the cut-out at the bottom of a 1080x1920 canvas and use
+`--plain green --alpha` so any background can go behind him.
 
 ### VTuber avatar
 ```bash

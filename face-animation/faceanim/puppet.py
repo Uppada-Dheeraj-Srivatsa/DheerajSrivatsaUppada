@@ -589,6 +589,8 @@ def main():
     ap.add_argument("--lips", type=float, default=1.25, help="extra gain on lip motion")
     ap.add_argument("--corners", type=float, default=1.45, help="extra gain on mouth corners (smile)")
     ap.add_argument("--move", type=float, default=0.8, help="head translation strength")
+    ap.add_argument("--turn", type=float, default=1.0,
+                    help="head rotation strength: 1 = softened nods/turns (safe for one photo), 1.5-1.8 = livelier")
     ap.add_argument("--bg", default=None, help="background image (used when the portrait has transparency)")
     ap.add_argument("--start", type=int, default=0); ap.add_argument("--end", type=int, default=None)
     ap.add_argument("--plain", default=None,
@@ -711,7 +713,10 @@ def main():
         if gw > 0.001:                              # inside a long dropout: ease toward a calm, level pose
             Pn = Pn + gw * 0.85 * (R - Pn)
             rv = rv * (1 - 0.8 * gw)
-        rv_d = rv * np.array([0.45, 0.55, 1.0])     # soften pitch / yaw, keep roll
+        # soften pitch / yaw (one front photo cannot really turn), keep roll; --turn scales all three
+        rv_d = rv * np.array([0.45, 0.55, 1.0]) * np.array([args.turn, args.turn, min(args.turn, 1.35)])
+        # soft limits: past ~5 deg of turn (yaw) the one-photo face mesh starts to fold at the cheek
+        rv_d = np.array([0.085 * np.tanh(rv_d[0] / 0.085), 0.075 * np.tanh(rv_d[1] / 0.075), 0.17 * np.tanh(rv_d[2] / 0.17)])
         Rd = cv2.Rodrigues(rv_d)[0].astype(np.float32)
         # 2D part of the head motion (roll, scale, translation of the head centre) for rings and placement
         cen_ref = R3[STABLE].mean(0); cen_cur = P3[STABLE].mean(0)
