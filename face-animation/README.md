@@ -62,7 +62,7 @@ Use a frontal, neutral, mouth-closed portrait. If its "transparent" checkerboard
 python3 faceanim/matte_checker.py character.png work/character_rgba.png      # clean cut-out, hair edges included
 python3 faceanim/make_bg.py work/bg.png 1080x1350                            # warm festive bokeh background
 python3 faceanim/puppet.py work/character_rgba.png work/track.npz work/norm.mp4 out/character_10s.mp4 \
-    --size 1080x1350 --bg work/bg.png --expr 1.1 --lips 1.05 --corners 1.25 --start 0 --end 300   # first 10 s at 30 fps
+    --size 1080x1350 --bg work/bg.png --expr 1.1 --lips 1.0 --corners 1.0 --start 0 --end 300   # first 10 s at 30 fps
 ```
 With a transparent portrait the character animates on its own layer over a fixed background, the head region
 covers all of the hair, blinks slide the real upper lid and lash line down, and blinks are kept symmetric.
@@ -72,9 +72,18 @@ For editing in CapCut, Premiere or DaVinci, render plain backgrounds instead of 
 `OUT_transparent.webm` with a real alpha channel:
 ```bash
 python3 faceanim/puppet.py work/character_rgba.png work/track.npz work/norm.mp4 out/character_10s.mp4 \
-    --size 1080x1350 --expr 1.1 --lips 1.05 --corners 1.25 --plain white,grey,green --alpha --start 0 --end 300
+    --size 1080x1350 --expr 1.1 --lips 1.0 --corners 1.0 --plain white,grey,green --alpha --start 0 --end 300
 ```
 Plain backgrounds skip the colour grade and light wrap, so the green (#00B140) keys cleanly.
+
+Mouth styles (`--mouth`):
+- `model` (default): an anatomical jaw-and-lips rig. The jaw hinges the chin, beard and lower lip down together, the
+  lips part in an elliptical opening while the corners stay sealed, the upper lip lifts only slightly, and smiles
+  stretch and curve the whole lip line while lifting the cheeks. It is one smooth displacement field applied before
+  the head-motion warp, so the skin around the mouth moves with the lips. Upper teeth, tongue and shading are painted
+  into the opening. `--lips` scales how far the mouth opens, `--corners` how strongly smiles read.
+- `closed`: no talking. The lips stay together and only smiles are kept (slowed so speech doesn't twitch them).
+- `mesh`: the older per-landmark lip transfer.
 
 ### VTuber avatar
 ```bash

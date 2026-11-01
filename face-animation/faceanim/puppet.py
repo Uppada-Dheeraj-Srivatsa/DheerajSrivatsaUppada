@@ -364,6 +364,181 @@ def draw_smile_lines(img, P, smile, mw):
     img[:] = np.clip(f, 0, 255).astype(np.uint8)
 
 
+# ---------------------------------------------------------------- jaw and lips model
+def _smooth01(x):
+    x = np.clip(x, 0, 1)
+    return x * x * (3 - 2 * x)
+
+
+class MouthRig:
+    """Anatomical lower-face motion, applied to the portrait before the head-motion warp.
+
+    The jaw hinges the chin, beard and lower lip down together, the lips part in a lens shape while the corners stay
+    sealed, the upper lip lifts only a little, and the corners (smile / stretch / pucker) drag the cheeks with them.
+    It is one smooth displacement field, so the skin around the mouth always moves with the lips."""
+
+    def __init__(self, Ls, W, H):
+        cL, cR = Ls[61].astype(np.float64), Ls[291].astype(np.float64)
+        self.cm = (cL + cR) / 2
+        self.ex = (cR - cL) / np.linalg.norm(cR - cL)
+        self.ey = np.array([-self.ex[1], self.ex[0]])
+        self.hw = float(np.linalg.norm(cR - cL) / 2)
+        self.mw = 2 * self.hw
+        up, lo = self.loc(Ls[UPPER_INNER]), self.loc(Ls[LOWER_INNER])
+        self.us = np.linspace(-1.2 * self.hw, 1.2 * self.hw, 97)
+        cur = lambda c: np.interp(self.us, c[np.argsort(c[:, 0]), 0], c[np.argsort(c[:, 0]), 1])
+        self.slit = 0.5 * (cur(up) + cur(lo))                      # where the closed lips meet
+        self.v_chin = float(self.loc(Ls[152:153])[0, 1])
+        self.v_nose = float(self.loc(Ls[2:3])[0, 1])
+        self.slit_c = float(np.interp(0, self.us, self.slit))
+        self.d_cs = self.v_chin - self.slit_c
+        ov = self.loc(Ls[FACE_OVAL])
+        band = ov[(ov[:, 1] > -0.3 * self.hw) & (ov[:, 1] < self.v_chin)]
+        self.hf = float(np.abs(band[:, 0]).max())                   # half face width around the mouth
+        self.vc = [float(np.interp(-self.hw, self.us, self.slit)), float(np.interp(self.hw, self.us, self.slit))]
+        # region of interest (image space) covering nose base to the neck, cheek to cheek
+        corners = np.array([[-1.35 * self.hf, self.v_nose - 0.6 * self.hw], [1.35 * self.hf, self.v_nose - 0.6 * self.hw],
+                            [-1.35 * self.hf, self.v_chin + 1.6 * self.d_cs], [1.35 * self.hf, self.v_chin + 1.6 * self.d_cs]])
+        img_c = self.img(corners)
+        self.x0, self.y0 = [int(max(0, np.floor(v))) for v in img_c.min(0)]
+        self.x1, self.y1 = int(min(W, np.ceil(img_c[:, 0].max()))), int(min(H, np.ceil(img_c[:, 1].max())))
+        yy, xx = np.mgrid[self.y0:self.y1, self.x0:self.x1].astype(np.float64)
+        g = self.loc(np.stack([xx, yy], -1))
+        self.U, self.V = g[..., 0], g[..., 1]
+        self.slitU = np.interp(self.U, self.us, self.slit)
+
+    def loc(self, p):
+        p = np.asarray(p, np.float64) - self.cm
+        return np.stack([p @ self.ex, p @ self.ey], -1)
+
+    def img(self, q):
+        q = np.asarray(q, np.float64)
+        return self.cm + q[..., 0:1] * self.ex + q[..., 1:2] * self.ey
+
+    def lens(self, U):
+        # elliptical opening that closes well before the corners, which stay sealed while talking
+        return np.clip(1 - (U / (0.8 * self.hw)) ** 2, 0, 1) ** 0.55
+
+    def jaw_lat(self, U):
+        return np.clip(1 - 0.5 * (U / self.hf) ** 2, 0, 1) * np.clip((1.18 * self.hf - np.abs(U)) / (0.3 * self.hf), 0, 1)
+
+    def field(self, U, V, p, below):
+        """Displacement (dU, dV) of source points (U, V). p = dict(open, cdx, cdy) in portrait pixels."""
+        op = p["open"]
+        j_lip, j_chin, up = 0.88 * op, 0.8 * op, 0.12 * op
+        slit = np.interp(U, self.us, self.slit)
+        if below:
+            tt = np.clip((V - slit) / np.maximum(self.v_chin - slit, 1), 0, 1)
+            s = _smooth01(tt)
+            dv = (1 - s) * j_lip * self.lens(U) + s * j_chin * self.jaw_lat(U)
+            vb = V - self.v_chin
+            hold = 1 - _smooth01((vb - 0.35 * self.d_cs) / (1.0 * self.d_cs))   # beard moves with the chin, neck eases out
+            dv = np.where(vb > 0, j_chin * self.jaw_lat(U) * hold, dv)
+        else:
+            ru = np.clip(1 - (slit - V) / max(slit.mean() - self.v_nose, 1), 0, 1)
+            dv = -up * self.lens(U) * ru ** 2
+        du = np.zeros_like(U)
+        for k, sgn in enumerate((-1, 1)):
+            # a corner moves the whole half of the lips: a linear stretch toward it and a U-shaped lift/drop,
+            # so the lip line curves like a smile instead of bending at the corner; beyond it the cheek follows
+            r = np.clip(sgn * U / self.hw, 0, None)
+            inside = r <= 1
+            hx = np.where(inside, r, np.exp(-((r - 1) / 0.7) ** 2))
+            hy = np.where(inside, r * r, np.exp(-((r - 1) / 0.7) ** 2))
+            dvc = V - self.vc[k]
+            sv = np.where(dvc < 0, 0.55 * self.hw, 0.75 * self.hw)       # tighter toward the nose than the chin
+            fv = np.exp(-0.5 * (dvc / sv) ** 2)
+            du = du + sgn * p["cdx"][k] * hx * fv
+            dv = dv + p["cdy"][k] * hy * fv
+            # cheeks ride up with a rising corner
+            gk = np.exp(-((U - sgn * 1.25 * self.hw) ** 2 + (V - (self.vc[k] - 0.9 * self.hw)) ** 2) / (2 * (0.8 * self.hw) ** 2))
+            dv = dv + 0.35 * min(p["cdy"][k], 0.0) * gk
+        return du, dv
+
+    def lip_lines(self, U, p):
+        """Inner edges of the upper and lower lip after the motion (local v), at columns U."""
+        slit = np.interp(U, self.us, self.slit)
+        _, dvu = self.field(U, slit - 1e-3, p, below=False)
+        _, dvl = self.field(U, slit + 1e-3, p, below=True)
+        return slit + dvu, slit + dvl
+
+    def apply(self, prem, p):
+        """Deform the ROI of a premultiplied BGRA float image in place; returns the open-mouth mask and geometry."""
+        U, V = self.U, self.V
+        yu, yl = self.lip_lines(U, p)
+        lens = self.lens(U)
+        below = V >= yl
+        gapm = (V > yu) & (V < yl) & (lens > 0)
+        su, sv = U.copy(), V.copy()
+        for _ in range(5):                                      # invert the forward field by fixed-point iteration
+            duA, dvA = self.field(su, sv, p, below=False)
+            duB, dvB = self.field(su, sv, p, below=True)
+            du = np.where(below, duB, duA); dv = np.where(below, dvB, dvA)
+            su, sv = U - du, V - dv
+        sv = np.where(below, np.maximum(sv, self.slitU + 1e-3), np.where(gapm, sv, np.minimum(sv, self.slitU)))
+        src = self.img(np.stack([su, sv], -1)).astype(np.float32)
+        roi = cv2.remap(prem, src[..., 0], src[..., 1], cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        prem[self.y0:self.y1, self.x0:self.x1] = roi
+        return yu, yl
+
+    def draw_interior(self, prem, p, yu, yl, rng):
+        """Paint the mouth opening (cavity, upper teeth, tongue) inside the parted lips, with soft edges and grain."""
+        op = p["open"]
+        if op < 0.6:
+            return
+        U, V = self.U, self.V
+        mw = self.mw
+        gap = np.maximum(yl - yu, 1e-3)
+        m = np.clip(V - yu + 0.5, 0, 1) * np.clip(yl - V + 0.5, 0, 1) * (self.lens(U) > 0)
+        if m.max() <= 0:
+            return
+        d = np.clip((V - yu) / gap, 0, 1)                         # 0 at the upper lip, 1 at the lower lip
+        lat = np.clip(np.abs(U) / (0.9 * self.hw), 0, 1)
+        gc = op                                                  # opening at the centre (pixels)
+        # cavity: deep warm red-brown, darker toward the corners and right under the upper lip
+        cav = np.array([30, 24, 52], np.float64) * (1 - 0.6 * lat ** 1.4)[..., None]
+        col = np.broadcast_to(cav, U.shape + (3,)).copy()
+        # tongue: low and central, only for wider openings
+        tg = _smooth01((gc / mw - 0.10) / 0.10)
+        tongue = np.clip(1 - ((U / (0.55 * self.hw)) ** 2 + ((d - 1.15) / 0.75) ** 2), 0, 1) * tg
+        col = col * (1 - 0.85 * tongue[..., None]) + np.array([78, 76, 150], np.float64) * (1 - 0.5 * lat)[..., None] * 0.85 * tongue[..., None]
+        # upper teeth: a few millimetres showing below the upper lip, receding into shadow toward the sides
+        tvis = _smooth01((gc / mw - 0.035) / 0.05)
+        th = np.minimum(0.45 * gap, 0.085 * mw) * np.sqrt(np.clip(1 - lat ** 2, 0, 1))
+        teeth = np.clip((yu + th - V) / 1.2, 0, 1) * (lat < 0.92) * tvis
+        shade = (0.42 + 0.58 * (1 - lat) ** 0.8)
+        vt = np.clip((V - yu) / np.maximum(th, 1), 0, 1)
+        tcol = np.array([178, 190, 203], np.float64) * (shade * (0.80 + 0.2 * np.sin(np.pi * (0.15 + 0.7 * vt))))[..., None]
+        edges = np.zeros_like(U)
+        for e in (0.0, 0.13, 0.24, 0.34):                         # incisor / lateral / canine boundaries
+            for sgn in ((1,) if e == 0 else (-1, 1)):
+                edges = np.maximum(edges, np.exp(-((U - sgn * e * mw) / (0.008 * mw + 0.6)) ** 2))
+        tcol = tcol * (1 - 0.22 * edges)[..., None]
+        col = col * (1 - teeth[..., None]) + tcol * teeth[..., None]
+        # lower teeth: just their edges, only when the mouth is quite open
+        lvis = _smooth01((gc / mw - 0.16) / 0.08) * 0.75
+        lteeth = np.clip((V - (yl - 0.45 * th)) / 1.2, 0, 1) * (lat < 0.75) * lvis
+        col = col * (1 - lteeth[..., None]) + np.array([150, 160, 172], np.float64) * (shade * 0.8)[..., None] * lteeth[..., None]
+        # contact shadows: the lips occlude light at the top and bottom of the opening
+        occ = 0.55 + 0.45 * _smooth01(np.minimum(V - yu, yl - V) / max(0.06 * mw, 1.5))
+        col *= occ[..., None]
+        col += rng.normal(0, 2.2, U.shape)[..., None]            # match the photo's grain
+        col = cv2.GaussianBlur(col.astype(np.float32), (0, 0), 0.6)
+        roi = prem[self.y0:self.y1, self.x0:self.x1]
+        # parted lips curve inward: shade a thin band of lip next to the opening, deeper toward the middle
+        band = max(0.045 * mw, 2.0)
+        lipshade = (np.exp(-np.clip(yu - V, 0, None) / band) * (V <= yu) +
+                    np.exp(-np.clip(V - yl, 0, None) / (1.3 * band)) * (V >= yl)) * self.lens(U) * _smooth01(gc / (0.04 * mw))
+        roi[..., :3] *= (1 - 0.28 * lipshade)[..., None].astype(np.float32)
+        m = cv2.GaussianBlur(m.astype(np.float32), (0, 0), 0.7)  # soft edge where lip meets the opening
+        a = m[..., None].astype(np.float32)
+        roi[..., :3] = roi[..., :3] * (1 - a) + col * a          # alpha is 1 inside the mouth
+        roi[..., 3:4] = roi[..., 3:4] * (1 - a) + 255.0 * a
+        # wet highlight along the lower lip's inner edge
+        hl = np.exp(-((V - yl - 1.2) / 1.1) ** 2) * self.lens(U) * _smooth01(gc / (0.05 * mw))
+        roi[..., :3] += (255 - roi[..., :3] / np.maximum(roi[..., 3:4] / 255, 1e-3)) * (0.10 * hl)[..., None] * (roi[..., 3:4] / 255)
+
+
 # ---------------------------------------------------------------- driver signals
 def driver_landmarks(npz, video):
     data = np.load(npz)
@@ -420,6 +595,9 @@ def main():
                     help="flat backgrounds for editing, e.g. white,grey,green or hex like #202020 "
                          "(transparent portraits only; writes OUT_<name>.mp4 for each)")
     ap.add_argument("--alpha", action="store_true", help="also write OUT_transparent.webm (VP9 with alpha channel)")
+    ap.add_argument("--mouth", choices=["model", "closed", "mesh"], default="model",
+                    help="model: anatomical jaw + lips rig (default); closed: no talking, smiles only; "
+                         "mesh: older per-landmark lip transfer")
     args = ap.parse_args()
     OW, OH = map(int, args.size.split("x"))
     plain = []
@@ -482,6 +660,45 @@ def main():
 
     c3s = Ls3[STABLE].mean(0)
     s0 = np.sqrt(abs(np.linalg.det(S0[:2, :2])))
+
+    rig, sig = None, None
+    if args.mouth != "mesh":
+        rig = MouthRig(Ls, OW, OH)
+        # the rig drives the lower face; the mesh only carries it with the head (expression transfer ramps
+        # from full at the base of the nose to none at the lips, so there is no seam)
+        v_l = rig.loc(Ls)[:, 1]
+        ramp = np.clip((rig.slit_c - v_l) / max(rig.slit_c - rig.v_nose, 1), 0, 1)
+        gains = gains * np.where(v_l > rig.v_nose, ramp, 1.0).astype(np.float32)
+        # driver signals, frontalised and mapped to portrait pixels: lip parting and each corner's motion
+        gap_ref = np.linalg.norm(R[13] - R[14])
+        A2 = S0[:2, :2]
+        sig = np.zeros((len(Ld), 5))
+        for t in range(len(Ld)):
+            P3 = Ld[t]
+            sc, Rm, tr = umeyama3(R3[STABLE], P3[STABLE])
+            Pn = (((P3 - tr) @ Rm) / sc)[:, :2]
+            g = max(0.0, float(np.linalg.norm(Pn[13] - Pn[14]) - gap_ref))
+            dL = (Pn[61] - R[61]) @ A2.T; dR = (Pn[291] - R[291]) @ A2.T
+            sig[t] = [g * s0, -(dL @ rig.ex), dL @ rig.ey, dR @ rig.ex, dR @ rig.ey]
+        sig = fa.gsmooth(sig.astype(np.float32), 1.0) * (1 - gapw)[:, None]
+        if args.mouth == "closed":
+            # no talking: lips stay together; only smiles (corners out and up) are kept, slowed so speech doesn't twitch
+            sig[:, 0] = 0
+            sig[:, [1, 3]] = fa.gsmooth(np.maximum(sig[:, [1, 3]], 0), 4.0)
+            sig[:, [2, 4]] = fa.gsmooth(np.minimum(sig[:, [2, 4]], 0), 4.0)
+        np.save(os.path.splitext(args.out)[0] + "_sig.npy", sig)
+        print(f"mouth rig: {args.mouth}, mouth width {rig.mw:.0f}px, opening p50/p95/max "
+              f"{np.percentile(sig[:, 0], 50):.1f}/{np.percentile(sig[:, 0], 95):.1f}/{sig[:, 0].max():.1f}px")
+    rng = np.random.default_rng(7)
+
+    def mouth_params(t):
+        o, cxl, cyl, cxr, cyr = sig[t]
+        cap = 0.30 * rig.mw
+        o = cap * np.tanh(o * args.lips / cap)
+        k = args.expr * args.corners
+        cx = np.clip(np.array([cxl, cxr]) * k, -0.12 * rig.mw, 0.15 * rig.mw)
+        cy = np.clip(np.array([cyl, cyr]) * k, -0.15 * rig.mw, 0.10 * rig.mw)
+        return dict(open=float(o), cdx=tuple(cx), cdy=tuple(cy))
 
     def target(t):
         P3 = Ld[t]
@@ -557,15 +774,19 @@ def main():
             cv2.imwrite(f"{args.out}_dbgsrc_{t:05d}.png", frame_src)
             print("debug closes", t, closes)
         mw = np.linalg.norm(tgt[61] - tgt[291])
-        if src_a is None:
-            out = warp(frame_src, pts, tgt, tris_outer, tris_face)
-            draw_mouth(out, tgt, mw)
-            return out, None
-        prem = np.dstack([frame_src.astype(np.float32) * src_a[..., None], src_a * 255.0])
+        a_src = src_a if src_a is not None else np.ones(src.shape[:2], np.float32)
+        prem = np.dstack([frame_src.astype(np.float32) * a_src[..., None], a_src * 255.0]).astype(np.float32)
+        if rig is not None:                       # jaw, lips and mouth interior, in portrait space
+            p = mouth_params(t)
+            yu, yl = rig.apply(prem, p)
+            rig.draw_interior(prem, p, yu, yl, rng)
         w4 = warp(prem, pts, tgt, tris_outer, tris_face)
         a = np.clip(w4[..., 3] / 255.0, 0, 1)
         rgb = np.clip(w4[..., :3], 0, 255).astype(np.uint8)
-        draw_mouth(rgb, tgt, mw)
+        if rig is None:
+            draw_mouth(rgb, tgt, mw)
+        if src_a is None:
+            return rgb, None
         return rgb.astype(np.float32), a
 
     def render(t):

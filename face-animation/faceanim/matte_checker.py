@@ -87,6 +87,13 @@ def main(src, dst):
     alpha = a_seg * (1 - hz) + np.maximum(a_hair, a_nonhair * a_seg) * hz
     alpha = np.maximum(alpha, non_hair_core)                     # face/clothes interior always solid
     alpha = np.where(bgsure > 0, np.minimum(alpha, a_diff), alpha)
+    # skin and clothes edges: the segmentation edge sits ~1-2 px outside the true edge, which leaves a light checker
+    # fringe once decontaminated; choke it there (hair edges keep the luma key)
+    # (weighted by actual hair pixels, not the wide hair zone, so a neck edge right under the beard is cleaned too)
+    choked = cv2.erode(alpha, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+    hair_px = cv2.GaussianBlur(cv2.dilate((hair > 0.4).astype(np.uint8), np.ones((7, 7), np.uint8)).astype(np.float32), (0, 0), 2)
+    wc = 1 - np.clip(hair_px, 0, 1)
+    alpha = alpha * (1 - wc) + choked * wc
     alpha = cv2.GaussianBlur(alpha, (0, 0), 0.6)
     alpha = np.clip(alpha, 0, 1)
     # colour decontamination: remove the checker contribution from semi-transparent edges
