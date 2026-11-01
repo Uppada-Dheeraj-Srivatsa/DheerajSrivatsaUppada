@@ -92,6 +92,18 @@ python3 faceanim/puppet.py work/character_rgba.png work/track.npz work/norm.mp4 
     --plain white,grey,green --alpha --start 0 --end 300
 ```
 
+### Talking from a voice recording (reels with a script)
+No new video needed: the tracked video is only used as a library of the person's face shapes. The mouth opens with
+the voice, blinks come at natural intervals, the eyebrows lift at some phrase starts, and the head moves gently with
+small nods on stressed syllables.
+```bash
+python3 faceanim/audio_driver.py work/track.npz voice.m4a work/voice_driver.npz
+python3 faceanim/reel_layout.py card.png work/character_rgba.png work/reel     # 1080x1920: card on top, presenter below
+python3 faceanim/puppet.py work/reel/char_canvas.png work/voice_driver.npz voice.m4a out/reel.mp4 \
+    --size 1080x1920 --bg work/reel/layout_bg.png --expr 1.1 --lips 1.05 --corners 1.25 --mouth mesh --no-teeth
+```
+For long recordings, render in parallel with `--start/--end` chunks and join them with ffmpeg's concat demuxer.
+
 ### VTuber avatar
 ```bash
 python3 faceanim/arkit_export.py work/track.npz work/norm.mp4 work/arkit.json   # if not done yet
