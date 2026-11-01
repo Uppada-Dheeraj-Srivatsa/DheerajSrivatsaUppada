@@ -1,0 +1,8 @@
+{
+  "name": "face-animation-three3d",
+  "private": true,
+  "description": "3D head renderer (porcelain / gold looks) driven by tracked ARKit blendshapes",
+  "dependencies": {
+    "three": "0.160.0"
+  }
+}

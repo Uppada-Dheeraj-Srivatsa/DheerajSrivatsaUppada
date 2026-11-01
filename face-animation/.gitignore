@@ -1,0 +1,24 @@
+# dependencies
+node_modules/
+
+# downloaded models (fetched by setup.sh)
+*.task
+*.tflite
+*.glb
+*.vrm
+assets/canonical_face_model.obj
+assets/face_tris.npy
+
+# personal inputs, tracking data and renders
+input/
+work/
+out/
+*.mp4
+*.mov
+*.npz
+vtuber/indian/
+vtuber/test/
+three3d/looks/
+
+# python
+__pycache__/

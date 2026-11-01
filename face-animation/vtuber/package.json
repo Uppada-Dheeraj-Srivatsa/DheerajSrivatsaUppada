@@ -1,0 +1,9 @@
+{
+  "name": "face-animation-vtuber",
+  "private": true,
+  "description": "VTuber (VRM) avatar renderer and procedural moji-style 3D head",
+  "dependencies": {
+    "@pixiv/three-vrm": "3.5.5",
+    "three": "0.180.0"
+  }
+}
