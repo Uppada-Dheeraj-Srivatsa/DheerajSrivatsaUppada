@@ -34,6 +34,9 @@ LIPS = sorted(set([61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 185, 40, 3
                    78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 191, 80, 81, 82, 13, 312, 311, 310, 415]))
 BROWS = [70, 63, 105, 66, 107, 55, 65, 52, 53, 46, 300, 293, 334, 296, 336, 285, 295, 282, 283, 276]
 STABLE = [10, 151, 9, 8, 168, 6, 197, 195, 127, 356, 33, 263, 133, 362, 109, 338, 67, 297]
+# flat backgrounds (BGR): white, neutral mid grey, standard chroma-key green #00B140
+PLAIN_BGR = {"white": (255, 255, 255), "grey": (128, 128, 128), "gray": (128, 128, 128), "green": (64, 177, 0),
+             "blue": (187, 71, 0), "black": (0, 0, 0)}
 
 
 # ---------------------------------------------------------------- geometry helpers
@@ -413,8 +416,21 @@ def main():
     ap.add_argument("--move", type=float, default=0.8, help="head translation strength")
     ap.add_argument("--bg", default=None, help="background image (used when the portrait has transparency)")
     ap.add_argument("--start", type=int, default=0); ap.add_argument("--end", type=int, default=None)
+    ap.add_argument("--plain", default=None,
+                    help="flat backgrounds for editing, e.g. white,grey,green or hex like #202020 "
+                         "(transparent portraits only; writes OUT_<name>.mp4 for each)")
+    ap.add_argument("--alpha", action="store_true", help="also write OUT_transparent.webm (VP9 with alpha channel)")
     args = ap.parse_args()
     OW, OH = map(int, args.size.split("x"))
+    plain = []
+    if args.plain:
+        for name in args.plain.split(","):
+            name = name.strip().lower()
+            if name.startswith("#"):
+                h = name[1:]
+                plain.append((h, np.array([int(h[4:6], 16), int(h[2:4], 16), int(h[0:2], 16)], np.float32)))
+            else:
+                plain.append((name, np.array(PLAIN_BGR[name], np.float32)))
 
     raw = cv2.imread(args.portrait, cv2.IMREAD_UNCHANGED)
     has_alpha = raw.ndim == 3 and raw.shape[2] == 4
@@ -430,7 +446,10 @@ def main():
     src_a = fitted[..., 3].astype(np.float32) / 255.0 if has_alpha else None
     bg = None
     if src_a is not None:
-        bg = cv2.resize(cv2.imread(args.bg), (OW, OH)) if args.bg else np.full((OH, OW, 3), 40, np.uint8)
+        if plain:
+            bg = np.full((OH, OW, 3), 128, np.uint8)   # detect on neutral grey; every plain colour shares the same mesh
+        else:
+            bg = cv2.resize(cv2.imread(args.bg), (OW, OH)) if args.bg else np.full((OH, OW, 3), 40, np.uint8)
         det_img = np.clip(src * src_a[..., None] + bg * (1 - src_a[..., None]), 0, 255).astype(np.uint8)
     else:
         det_img = src
@@ -527,7 +546,8 @@ def main():
     src_closed, eye_masks = build_closed_eyes(src, Ls)
     cv2.imwrite(os.path.splitext(args.out)[0] + "_closed_eyes_check.png", src_closed)
 
-    def render(t):
+    def layer(t):
+        """Animate one frame. Returns the warped image (premultiplied when the portrait has alpha) and its alpha."""
         tgt, smile, closes = target(t)
         frame_src = src
         if max(closes) > 0.01:
@@ -540,13 +560,19 @@ def main():
         if src_a is None:
             out = warp(frame_src, pts, tgt, tris_outer, tris_face)
             draw_mouth(out, tgt, mw)
-            return out
+            return out, None
         prem = np.dstack([frame_src.astype(np.float32) * src_a[..., None], src_a * 255.0])
         w4 = warp(prem, pts, tgt, tris_outer, tris_face)
         a = np.clip(w4[..., 3] / 255.0, 0, 1)
         rgb = np.clip(w4[..., :3], 0, 255).astype(np.uint8)
         draw_mouth(rgb, tgt, mw)
-        f = rgb.astype(np.float32) * np.array([0.97, 1.0, 1.03], np.float32)   # slight warm grade to sit in the scene
+        return rgb.astype(np.float32), a
+
+    def render(t):
+        f, a = layer(t)
+        if a is None:
+            return f
+        f = f * np.array([0.97, 1.0, 1.03], np.float32)   # slight warm grade to sit in the scene
         # light wrap: background light spills softly onto the subject's edges
         edge = np.clip(a - cv2.erode(a, np.ones((9, 9), np.uint8)), 0, 1)
         edge = cv2.GaussianBlur(edge, (0, 0), 3.0) * a
@@ -554,13 +580,53 @@ def main():
         out = out + edge[..., None] * cv2.GaussianBlur(bg.astype(np.float32), (0, 0), 12) * 0.22
         return np.clip(out + 0.5, 0, 255).astype(np.uint8)
 
+    def flat(f, a, col):
+        # plain studio background: no grade and no light wrap, so the edges stay clean for keying
+        return np.clip(f + col * (1 - a[..., None]) + 0.5, 0, 255).astype(np.uint8)
+
     n = len(Ld)
+    base = os.path.splitext(args.out)[0]
     if args.frames:
         for t in [int(x) for x in args.frames.split(",")]:
-            cv2.imwrite(f"{args.out}_{t:05d}.png", render(t))
-            print("wrote", f"{args.out}_{t:05d}.png")
+            if plain and src_a is not None:
+                f, a = layer(t)
+                for name, col in plain:
+                    cv2.imwrite(f"{base}_{name}_{t:05d}.png", flat(f, a, col))
+                    print("wrote", f"{base}_{name}_{t:05d}.png")
+            else:
+                cv2.imwrite(f"{args.out}_{t:05d}.png", render(t))
+                print("wrote", f"{args.out}_{t:05d}.png")
         return
     t0, t1 = args.start, min(n, args.end if args.end is not None else n)
+    audio_in = ["-ss", f"{t0 / fps:.4f}", "-t", f"{(t1 - t0) / fps:.4f}", "-i", args.video]
+    if (plain or args.alpha) and src_a is not None:
+        pipes = []
+        for name, col in plain:
+            cmd = ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{OW}x{OH}", "-r", f"{fps}",
+                   "-i", "-", *audio_in, "-map", "0:v", "-map", "1:a?", "-c:v", "libx264", "-crf", "14", "-preset", "medium",
+                   "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart",
+                   f"{base}_{name}.mp4"]
+            pipes.append((col, subprocess.Popen(cmd, stdin=subprocess.PIPE)))
+        if args.alpha:
+            cmd = ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "bgra", "-s", f"{OW}x{OH}", "-r", f"{fps}",
+                   "-i", "-", *audio_in, "-map", "0:v", "-map", "1:a?", "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
+                   "-b:v", "0", "-crf", "22", "-deadline", "good", "-cpu-used", "4", "-row-mt", "1", "-auto-alt-ref", "0",
+                   "-c:a", "libopus", "-b:a", "160k", "-shortest", f"{base}_transparent.webm"]
+            pipes.append((None, subprocess.Popen(cmd, stdin=subprocess.PIPE)))
+        for t in range(t0, t1):
+            f, a = layer(t)
+            for col, p in pipes:
+                if col is not None:
+                    p.stdin.write(flat(f, a, col).tobytes())
+                else:   # straight (un-premultiplied) colour + alpha
+                    rgb = np.where(a[..., None] > 1e-3, f / np.maximum(a[..., None], 1e-3), 0)
+                    p.stdin.write(np.dstack([np.clip(rgb + 0.5, 0, 255), a * 255 + 0.5]).astype(np.uint8).tobytes())
+            if t % 50 == 0:
+                print(f"  frame {t}/{t1}", flush=True)
+        for _, p in pipes:
+            p.stdin.close(); p.wait()
+        print("wrote", ", ".join([f"{base}_{nm}.mp4" for nm, _ in plain] + ([f"{base}_transparent.webm"] if args.alpha else [])))
+        return
     cmd = ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{OW}x{OH}", "-r", f"{fps}",
            "-i", "-", "-ss", f"{t0 / fps:.4f}", "-t", f"{(t1 - t0) / fps:.4f}", "-i", args.video, "-map", "0:v", "-map", "1:a?",
            "-c:v", "libx264", "-crf", "16", "-preset", "medium",

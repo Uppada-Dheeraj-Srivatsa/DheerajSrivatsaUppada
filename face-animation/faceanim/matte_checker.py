@@ -76,7 +76,15 @@ def main(src, dst):
     non_hair_core = core * (1 - (hair > 0.5))
     nonhair = np.clip(conf[2] + conf[3] + conf[4], 0, 1)
     a_nonhair = np.clip((nonhair - 0.3) / 0.4, 0, 1)
-    alpha = a_seg * (1 - hz) + np.maximum(a_diff, a_nonhair * a_seg) * hz
+    # the luma key is only trusted next to visible checker: deep inside dense hair, light highlights stay solid
+    # (otherwise a green or grey background shows through the shine). Checker seen through gaps is bright and
+    # near-neutral (luma >= ~205, slightly tinted by hair), while shine inside dark hair stays well below 150.
+    sat = I.max(2) - I.min(2)
+    ck = ((lum >= 196) & (sat <= 24)).astype(np.uint8)
+    dist_ck = cv2.distanceTransform(1 - ck, cv2.DIST_L2, 5)
+    near = 1 - np.clip((dist_ck - 3) / 12, 0, 1)
+    a_hair = a_diff * near + (1 - near)
+    alpha = a_seg * (1 - hz) + np.maximum(a_hair, a_nonhair * a_seg) * hz
     alpha = np.maximum(alpha, non_hair_core)                     # face/clothes interior always solid
     alpha = np.where(bgsure > 0, np.minimum(alpha, a_diff), alpha)
     alpha = cv2.GaussianBlur(alpha, (0, 0), 0.6)

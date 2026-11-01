@@ -67,6 +67,15 @@ python3 faceanim/puppet.py work/character_rgba.png work/track.npz work/norm.mp4 
 With a transparent portrait the character animates on its own layer over a fixed background, the head region
 covers all of the hair, blinks slide the real upper lid and lash line down, and blinks are kept symmetric.
 
+For editing in CapCut, Premiere or DaVinci, render plain backgrounds instead of a scene. One pass writes every colour
+(`OUT_white.mp4`, `OUT_grey.mp4`, `OUT_green.mp4`; hex like `#202020` also works) and `--alpha` adds
+`OUT_transparent.webm` with a real alpha channel:
+```bash
+python3 faceanim/puppet.py work/character_rgba.png work/track.npz work/norm.mp4 out/character_10s.mp4 \
+    --size 1080x1350 --expr 1.1 --lips 1.05 --corners 1.25 --plain white,grey,green --alpha --start 0 --end 300
+```
+Plain backgrounds skip the colour grade and light wrap, so the green (#00B140) keys cleanly.
+
 ### VTuber avatar
 ```bash
 python3 faceanim/arkit_export.py work/track.npz work/norm.mp4 work/arkit.json   # if not done yet
