@@ -154,7 +154,7 @@ def warp(src, src_pts, dst_pts, tris_outer, tris_face):
 
 
 # ---------------------------------------------------------------- mouth interior
-def draw_mouth(img, P, mouth_w):
+def draw_mouth(img, P, mouth_w, teeth_on=True):
     """Synthesize the mouth interior inside the target inner-lip polygon (in place)."""
     poly = P[INNER_LIPS]
     area = cv2.contourArea(poly.astype(np.float32))
@@ -190,7 +190,7 @@ def draw_mouth(img, P, mouth_w):
     tongue = np.clip(1 - (((cx - 0.5) / 0.34) ** 2 + ((tdepth - 1.05) / 0.55) ** 2), 0, 1)
     col = col * (1 - tongue[..., None] * 0.9) + np.array([92, 88, 168], np.float32) * (0.55 + 0.45 * edge)[..., None] * tongue[..., None] * 0.9
     # upper teeth: band under the upper lip, shown once the mouth is open enough
-    opened = np.clip((open_ratio - 0.015) / 0.05, 0, 1)
+    opened = np.clip((open_ratio - 0.015) / 0.05, 0, 1) * float(teeth_on)
     tooth_h = np.minimum(gap * 0.33, mouth_w * ss * 0.085)
     teeth = np.clip(1 - (ys - yu[None]) / tooth_h[None], 0, 1)
     teeth = (teeth > 0.02).astype(np.float32) * np.clip(edge * 1.5, 0, 1) ** 1.3 * opened
@@ -205,7 +205,7 @@ def draw_mouth(img, P, mouth_w):
     col = col * (1 - teeth[..., None]) + tcol * teeth[..., None]
     # lower teeth hint for wide openings
     lower = np.clip(1 - (yl[None] - ys) / (tooth_h[None] * 0.6), 0, 1)
-    lower = (lower > 0.02).astype(np.float32) * edge * np.clip((open_ratio - 0.08) / 0.06, 0, 1) * 0.6
+    lower = (lower > 0.02).astype(np.float32) * edge * np.clip((open_ratio - 0.08) / 0.06, 0, 1) * 0.6 * float(teeth_on)
     lower = cv2.GaussianBlur(lower, (0, 0), ss * 0.6)
     col = col * (1 - lower[..., None]) + np.array([190, 198, 206], np.float32) * lower[..., None]
     # lip contact shadow
@@ -481,7 +481,7 @@ class MouthRig:
         prem[self.y0:self.y1, self.x0:self.x1] = roi
         return yu, yl
 
-    def draw_interior(self, prem, p, yu, yl, rng):
+    def draw_interior(self, prem, p, yu, yl, rng, teeth_on=True):
         """Paint the mouth opening (cavity, upper teeth, tongue) inside the parted lips, with soft edges and grain."""
         op = p["open"]
         if op < 0.6:
@@ -503,7 +503,7 @@ class MouthRig:
         tongue = np.clip(1 - ((U / (0.55 * self.hw)) ** 2 + ((d - 1.15) / 0.75) ** 2), 0, 1) * tg
         col = col * (1 - 0.85 * tongue[..., None]) + np.array([78, 76, 150], np.float64) * (1 - 0.5 * lat)[..., None] * 0.85 * tongue[..., None]
         # upper teeth: a few millimetres showing below the upper lip, receding into shadow toward the sides
-        tvis = _smooth01((gc / mw - 0.035) / 0.05)
+        tvis = _smooth01((gc / mw - 0.035) / 0.05) * float(teeth_on)
         th = np.minimum(0.45 * gap, 0.085 * mw) * np.sqrt(np.clip(1 - lat ** 2, 0, 1))
         teeth = np.clip((yu + th - V) / 1.2, 0, 1) * (lat < 0.92) * tvis
         shade = (0.42 + 0.58 * (1 - lat) ** 0.8)
@@ -516,7 +516,7 @@ class MouthRig:
         tcol = tcol * (1 - 0.22 * edges)[..., None]
         col = col * (1 - teeth[..., None]) + tcol * teeth[..., None]
         # lower teeth: just their edges, only when the mouth is quite open
-        lvis = _smooth01((gc / mw - 0.16) / 0.08) * 0.75
+        lvis = _smooth01((gc / mw - 0.16) / 0.08) * 0.75 * float(teeth_on)
         lteeth = np.clip((V - (yl - 0.45 * th)) / 1.2, 0, 1) * (lat < 0.75) * lvis
         col = col * (1 - lteeth[..., None]) + np.array([150, 160, 172], np.float64) * (shade * 0.8)[..., None] * lteeth[..., None]
         # contact shadows: the lips occlude light at the top and bottom of the opening
@@ -595,6 +595,7 @@ def main():
                     help="flat backgrounds for editing, e.g. white,grey,green or hex like #202020 "
                          "(transparent portraits only; writes OUT_<name>.mp4 for each)")
     ap.add_argument("--alpha", action="store_true", help="also write OUT_transparent.webm (VP9 with alpha channel)")
+    ap.add_argument("--no-teeth", action="store_true", help="open mouth shows only the dark interior (no teeth)")
     ap.add_argument("--mouth", choices=["model", "closed", "mesh"], default="model",
                     help="model: anatomical jaw + lips rig (default); closed: no talking, smiles only; "
                          "mesh: older per-landmark lip transfer")
@@ -779,12 +780,12 @@ def main():
         if rig is not None:                       # jaw, lips and mouth interior, in portrait space
             p = mouth_params(t)
             yu, yl = rig.apply(prem, p)
-            rig.draw_interior(prem, p, yu, yl, rng)
+            rig.draw_interior(prem, p, yu, yl, rng, teeth_on=not args.no_teeth)
         w4 = warp(prem, pts, tgt, tris_outer, tris_face)
         a = np.clip(w4[..., 3] / 255.0, 0, 1)
         rgb = np.clip(w4[..., :3], 0, 255).astype(np.uint8)
         if rig is None:
-            draw_mouth(rgb, tgt, mw)
+            draw_mouth(rgb, tgt, mw, teeth_on=not args.no_teeth)
         if src_a is None:
             return rgb, None
         return rgb.astype(np.float32), a

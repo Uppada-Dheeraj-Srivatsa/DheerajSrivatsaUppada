@@ -83,7 +83,14 @@ Mouth styles (`--mouth`):
   the head-motion warp, so the skin around the mouth moves with the lips. Upper teeth, tongue and shading are painted
   into the opening. `--lips` scales how far the mouth opens, `--corners` how strongly smiles read.
 - `closed`: no talking. The lips stay together and only smiles are kept (slowed so speech doesn't twitch them).
-- `mesh`: the older per-landmark lip transfer.
+- `mesh`: the older per-landmark lip transfer (bigger, more cartoon-like mouth shapes).
+
+Add `--no-teeth` to any style to show only a dark mouth interior when the lips part. The final 10 s render used:
+```bash
+python3 faceanim/puppet.py work/character_rgba.png work/track.npz work/norm.mp4 out/character_10s.mp4 \
+    --size 1080x1350 --expr 1.1 --lips 1.05 --corners 1.25 --mouth mesh --no-teeth \
+    --plain white,grey,green --alpha --start 0 --end 300
+```
 
 ### VTuber avatar
 ```bash
